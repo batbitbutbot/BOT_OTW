@@ -1,6 +1,6 @@
 // ==========================================
 // INCES BOT - FINAL WEBHOOK SERVER VERSION
-// Tanpa pesan loading, tanpa duplikasi
+// Aman untuk isi Google Sheet dengan karakter _ * < > &
 // ==========================================
 
 const express = require("express");
@@ -21,83 +21,114 @@ const app = express();
 
 app.use(bodyParser.json());
 
+// === Escape HTML agar aman untuk Telegram parse_mode HTML ===
+function escapeHTML(text = "") {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 // === Koneksi ke Google Sheets ===
 async function authorize() {
   const auth = new google.auth.GoogleAuth({
     credentials: GOOGLE_CREDENTIALS,
     scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
   });
+
   return auth.getClient();
 }
 
 async function getSheetData() {
   const authClient = await authorize();
   const sheets = google.sheets({ version: "v4", auth: authClient });
+
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: `${SHEET_NAME}!A1:C100`,
   });
+
   return response.data.values || [];
 }
 
 async function getDataByCommand(command) {
   try {
     const rows = await getSheetData();
+
     const foundRow = rows.find(
       (row) => row[0] && row[0].toLowerCase() === `/${command}`.toLowerCase()
     );
 
     if (!foundRow) {
-      return `❌ Tidak ditemukan data untuk perintah *${command}*`;
+      return `❌ Tidak ditemukan data untuk perintah <b>${escapeHTML(command)}</b>`;
     }
 
-    const dataText = foundRow[1] || "(kosong)";
-    const note = foundRow[2] ? `\n📝 Catatan: ${foundRow[2]}` : "";
+    const dataText = escapeHTML(foundRow[1] || "(kosong)");
+    const note = foundRow[2]
+      ? `\n📝 Catatan: ${escapeHTML(foundRow[2])}`
+      : "";
 
-    return `📄 *${command.toUpperCase()}*\n\n${dataText}${note}`;
+    return `📄 <b>${escapeHTML(command.toUpperCase())}</b>\n\n${dataText}${note}`;
   } catch (err) {
     console.error("❌ ERROR getDataByCommand:", err.message);
     return "⚠️ Terjadi kesalahan saat mengambil data dari Google Sheets.";
   }
 }
 
-// === HANDLER ===
+// === HANDLER WEBHOOK ===
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
-  const message = req.body.message;
-  if (!message || !message.text) return res.sendStatus(200);
+  try {
+    const message = req.body.message;
 
-  const chatId = message.chat.id;
-  const text = message.text.trim().toLowerCase();
+    if (!message || !message.text) {
+      return res.sendStatus(200);
+    }
 
-  if (text === "/start") {
-    bot.sendMessage(
-      chatId,
-      `👋 Halo ${message.from.first_name}! Ketik /help untuk melihat daftar perintah.`,
-      { parse_mode: "Markdown" }
-    );
-  } else if (text === "/help") {
-    const rows = await getSheetData();
-    const commands = rows
-      .filter((row) => row[0] && row[0].startsWith("/"))
-      .map((row) => row[0])
-      .join("\n");
-    bot.sendMessage(chatId, `📘 *Daftar Perintah:*\n${commands}`, {
-      parse_mode: "Markdown",
-    });
-  } else if (text.startsWith("/")) {
-    const command = text.slice(1);
-    const data = await getDataByCommand(command);
-    bot.sendMessage(chatId, data, { parse_mode: "Markdown" });
+    const chatId = message.chat.id;
+    const text = message.text.trim().toLowerCase();
+
+    if (text === "/start") {
+      await bot.sendMessage(
+        chatId,
+        `👋 Halo ${escapeHTML(message.from.first_name || "teman")}! Ketik /help untuk melihat daftar perintah.`,
+        { parse_mode: "HTML" }
+      );
+    } else if (text === "/help") {
+      const rows = await getSheetData();
+
+      const commands = rows
+        .filter((row) => row[0] && row[0].startsWith("/"))
+        .map((row) => row[0])
+        .join("\n");
+
+      await bot.sendMessage(
+        chatId,
+        `📘 <b>Daftar Perintah:</b>\n${escapeHTML(commands || "Belum ada perintah.")}`,
+        { parse_mode: "HTML" }
+      );
+    } else if (text.startsWith("/")) {
+      const command = text.slice(1);
+      const data = await getDataByCommand(command);
+
+      await bot.sendMessage(chatId, data, {
+        parse_mode: "HTML",
+      });
+    }
+
+    return res.sendStatus(200);
+  } catch (err) {
+    console.error("❌ ERROR webhook handler:", err.message);
+    return res.sendStatus(200);
   }
-
-  return res.sendStatus(200);
 });
 
 // === Set Webhook ===
 (async () => {
   try {
     const webhookUrl = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/webhook/${TELEGRAM_TOKEN}`;
+
     await bot.setWebHook(webhookUrl);
+
     console.log(`✅ Webhook bot aktif di: ${webhookUrl}`);
   } catch (err) {
     console.error("❌ Gagal set webhook:", err.message);
